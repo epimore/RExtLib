@@ -1,0 +1,121 @@
+{
+  "name": "rust-cargo-external-libraries",
+  "displayName": "Rust Cargo External Libraries",
+  "description": "Show Cargo dependencies and rust-std as an External Libraries tree in VS Code.",
+  "version": "0.1.0",
+  "publisher": "epimore",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "icon": "icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/epimore/RExtLib.git"
+  },
+  "homepage": "https://github.com/epimore/RExtLib",
+  "bugs": {
+    "url": "https://github.com/epimore/RExtLib/issues"
+  },
+  "keywords": [
+    "rust",
+    "cargo",
+    "dependencies",
+    "external-libraries",
+    "rust-analyzer",
+    "cargo-metadata"
+  ],
+  "activationEvents": [
+    "workspaceContains:Cargo.toml",
+    "onView:rustExternalLibraries",
+    "onLanguage:toml"
+  ],
+  "extensionKind": [
+    "workspace"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "views": {
+      "explorer": [
+        {
+          "id": "rustExternalLibraries",
+          "name": "Rust External Libraries"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "rustExternalLibraries.refresh",
+        "title": "Rust External Libraries: Refresh"
+      },
+      {
+        "command": "rustExternalLibraries.openCargoToml",
+        "title": "Open Cargo.toml"
+      },
+      {
+        "command": "rustExternalLibraries.openDirectory",
+        "title": "Open Directory"
+      },
+      {
+        "command": "rustExternalLibraries.revealInExplorer",
+        "title": "Reveal in Explorer"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "rustExternalLibraries.refresh",
+          "when": "view == rustExternalLibraries",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "rustExternalLibraries.openCargoToml",
+          "when": "view == rustExternalLibraries && viewItem == crate",
+          "group": "inline"
+        },
+        {
+          "command": "rustExternalLibraries.openDirectory",
+          "when": "view == rustExternalLibraries && viewItem =~ /^(crate|dir|rustStd)$/",
+          "group": "navigation"
+        },
+        {
+          "command": "rustExternalLibraries.revealInExplorer",
+          "when": "view == rustExternalLibraries && viewItem =~ /^(crate|dir|file|rustStd)$/",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Rust Cargo External Libraries",
+      "properties": {
+        "rustExternalLibraries.includeHiddenFiles": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show hidden files and directories under dependency source trees."
+        },
+        "rustExternalLibraries.includeTargetDir": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show target directories if present under dependency source trees. Usually keep this disabled."
+        },
+        "rustExternalLibraries.maxDirectoryEntries": {
+          "type": "number",
+          "default": 500,
+          "minimum": 50,
+          "maximum": 5000,
+          "description": "Maximum entries shown from a single directory in the tree."
+        },
+        "rustExternalLibraries.preferLibRsForCargoTomlDefinition": {
+          "type": "boolean",
+          "default": true,
+          "description": "When Ctrl+Clicking a dependency in Cargo.toml, prefer src/lib.rs over the dependency Cargo.toml when available."
+        }
+      }
+    }
+  }
+}
