@@ -7,6 +7,9 @@ const path = require("path");
 
 const VIEW_ID = "rustExternalLibraries";
 const OUTPUT_NAME = "Rust External Libraries";
+const CARGO_MANIFEST_GLOB = "**/Cargo.toml";
+const CARGO_DISCOVERY_EXCLUDE_GLOB = "**/{target,node_modules,.git}/**";
+const MAX_CARGO_MANIFESTS = 2000;
 
 let output;
 let provider;
@@ -75,40 +78,69 @@ class RustExternalLibrariesProvider {
   /** @param {boolean} showMessage */
   async refresh(showMessage) {
     try {
-      const folders = getWorkspaceFoldersWithCargoToml();
+      const projects = await discoverCargoProjects();
       this.caches.clear();
       this.roots = [];
 
-      if (folders.length === 0) {
-        this.roots = [LibNode.info("No Cargo.toml found in the current workspace.")];
+      if (projects.length === 0) {
+        this.roots = [LibNode.info("No Cargo projects found in the current workspace.")];
+        this.lastError = undefined;
         this._onDidChangeTreeData.fire(undefined);
         return;
       }
 
-      const workspaceNodes = [];
+      const projectNodes = [];
+      let failedProjects = 0;
 
-      for (const folder of folders) {
-        const cache = await loadWorkspaceCache(folder);
-        this.caches.set(folder.uri.toString(), cache);
-        const groups = buildGroupNodes(cache);
+      for (const project of projects) {
+        try {
+          const cache = await loadWorkspaceCache(project);
+          this.caches.set(canonicalPath(project.rootPath), cache);
+          const groups = buildGroupNodes(cache);
 
-        if (folders.length === 1) {
-          this.roots = groups;
-        } else {
-          workspaceNodes.push(LibNode.group(folder.name, groups, folder.uri.fsPath));
+          if (projects.length === 1) {
+            this.roots = groups;
+          } else {
+            projectNodes.push(LibNode.group(project.name, groups, project.rootPath));
+          }
+        } catch (err) {
+          failedProjects += 1;
+          logError(`Failed to load Cargo project: ${project.rootPath}`, err);
+
+          if (projects.length === 1) {
+            this.roots = [LibNode.error(formatError(err))];
+          } else {
+            projectNodes.push(
+              LibNode.group(
+                project.name,
+                [LibNode.error(formatError(err))],
+                project.rootPath
+              )
+            );
+          }
         }
       }
 
-      if (folders.length > 1) {
-        this.roots = workspaceNodes;
+      if (projects.length > 1) {
+        this.roots = projectNodes;
       }
 
-      this.lastError = undefined;
+      this.lastError = failedProjects > 0
+        ? new Error(`${failedProjects} Cargo project(s) failed to load.`)
+        : undefined;
       this._onDidChangeTreeData.fire(undefined);
 
       if (showMessage) {
         const total = Array.from(this.caches.values()).reduce((n, c) => n + c.packages.length, 0);
-        vscode.window.showInformationMessage(`Rust External Libraries refreshed: ${total} dependency packages.`);
+        if (failedProjects > 0) {
+          vscode.window.showWarningMessage(
+            `Rust External Libraries refreshed: ${total} dependency packages; ${failedProjects} Cargo project(s) failed.`
+          );
+        } else {
+          vscode.window.showInformationMessage(
+            `Rust External Libraries refreshed: ${total} dependency packages across ${projects.length} Cargo project(s).`
+          );
+        }
       }
     } catch (err) {
       this.lastError = err;
@@ -145,22 +177,34 @@ class RustExternalLibrariesProvider {
 
   /** @param {vscode.Uri | undefined} uri */
   getCacheForUri(uri) {
-    const folders = vscode.workspace.workspaceFolders ?? [];
-    if (!uri && folders.length === 1) {
-      return this.caches.get(folders[0].uri.toString());
+    if (this.caches.size === 0) {
+      return undefined;
     }
 
-    const folder = uri ? vscode.workspace.getWorkspaceFolder(uri) : undefined;
-    if (folder) {
-      const exact = this.caches.get(folder.uri.toString());
-      if (exact) return exact;
+    if (!uri) {
+      return this.caches.size === 1
+        ? Array.from(this.caches.values())[0]
+        : undefined;
     }
 
-    if (this.caches.size === 1) {
-      return Array.from(this.caches.values())[0];
+    const targetPath = canonicalPath(uri.fsPath);
+    let bestCache;
+    let bestRootLength = -1;
+
+    for (const [rootPath, cache] of this.caches) {
+      if (isPathInside(targetPath, rootPath) && rootPath.length > bestRootLength) {
+        bestCache = cache;
+        bestRootLength = rootPath.length;
+      }
     }
 
-    return undefined;
+    if (bestCache) {
+      return bestCache;
+    }
+
+    return this.caches.size === 1
+      ? Array.from(this.caches.values())[0]
+      : undefined;
   }
 }
 
@@ -230,29 +274,116 @@ class LibNode extends vscode.TreeItem {
 }
 
 /**
+ * @typedef {Object} CargoProject
+ * @property {vscode.WorkspaceFolder} workspaceFolder
+ * @property {string} name
+ * @property {string} rootPath
+ * @property {string} manifestPath
+ */
+
+/**
  * @typedef {Object} WorkspaceCache
- * @property {vscode.WorkspaceFolder} folder
+ * @property {CargoProject} project
  * @property {any} metadata
  * @property {any[]} packages
+ * @property {Set<string>} workspaceMemberIds
  * @property {Map<string, any>} packageById
  * @property {Map<string, any[]>} packagesByName
  * @property {Map<string, string>} aliasToPackageName
  * @property {string | undefined} rustStdPath
  */
 
-/** @returns {vscode.WorkspaceFolder[]} */
-function getWorkspaceFoldersWithCargoToml() {
-  const folders = vscode.workspace.workspaceFolders ?? [];
-  return folders.filter(folder => fs.existsSync(path.join(folder.uri.fsPath, "Cargo.toml")));
+/** @returns {Promise<CargoProject[]>} */
+async function discoverCargoProjects() {
+  const workspaceFolders = vscode.workspace.workspaceFolders ?? [];
+  /** @type {Map<string, CargoProject>} */
+  const projects = new Map();
+  let manifestCount = 0;
+  let firstError;
+
+  for (const workspaceFolder of workspaceFolders) {
+    const manifests = await vscode.workspace.findFiles(
+      new vscode.RelativePattern(workspaceFolder, CARGO_MANIFEST_GLOB),
+      CARGO_DISCOVERY_EXCLUDE_GLOB,
+      MAX_CARGO_MANIFESTS
+    );
+
+    manifestCount += manifests.length;
+
+    for (const manifestUri of manifests) {
+      try {
+        const rootManifest = (await execFileText(
+          "cargo",
+          [
+            "locate-project",
+            "--workspace",
+            "--message-format",
+            "plain",
+            "--manifest-path",
+            manifestUri.fsPath
+          ],
+          path.dirname(manifestUri.fsPath)
+        )).trim();
+
+        if (!rootManifest) {
+          continue;
+        }
+
+        const manifestPath = normalizeCargoPath(rootManifest);
+        const rootPath = path.dirname(manifestPath);
+        const key = canonicalPath(rootPath);
+
+        if (projects.has(key)) {
+          continue;
+        }
+
+        const relativePath = path.relative(workspaceFolder.uri.fsPath, rootPath);
+        const name = !relativePath || relativePath === "."
+          ? workspaceFolder.name
+          : relativePath;
+
+        projects.set(key, {
+          workspaceFolder,
+          name,
+          rootPath,
+          manifestPath
+        });
+      } catch (err) {
+        if (!firstError) {
+          firstError = err;
+        }
+        logError(`Failed to locate Cargo workspace for ${manifestUri.fsPath}`, err);
+      }
+    }
+  }
+
+  if (projects.size === 0 && manifestCount > 0 && firstError) {
+    throw firstError;
+  }
+
+  return Array.from(projects.values()).sort((a, b) => {
+    const nameOrder = a.name.localeCompare(b.name);
+    if (nameOrder !== 0) return nameOrder;
+    return a.rootPath.localeCompare(b.rootPath);
+  });
 }
 
-/** @param {vscode.WorkspaceFolder} folder @returns {Promise<WorkspaceCache>} */
-async function loadWorkspaceCache(folder) {
-  const metadata = await execFileJson("cargo", ["metadata", "--format-version=1"], folder.uri.fsPath);
+/** @param {CargoProject} project @returns {Promise<WorkspaceCache>} */
+async function loadWorkspaceCache(project) {
+  const metadata = await execFileJson(
+    "cargo",
+    [
+      "metadata",
+      "--format-version=1",
+      "--manifest-path",
+      project.manifestPath
+    ],
+    project.rootPath
+  );
   const workspaceMemberIds = new Set(metadata.workspace_members ?? []);
 
   const packages = (metadata.packages ?? [])
-    .filter(pkg => pkg && pkg.source !== null && !workspaceMemberIds.has(pkg.id));
+    .filter(pkg => pkg && !workspaceMemberIds.has(pkg.id));
 
   const packageById = new Map();
   const packagesByName = new Map();
@@ -272,12 +403,13 @@ async function loadWorkspaceCache(folder) {
     }
   }
 
-  const rustStdPath = await findRustStdPath(folder.uri.fsPath);
+  const rustStdPath = await findRustStdPath(project.rootPath);
 
   return {
-    folder,
+    project,
     metadata,
     packages,
+    workspaceMemberIds,
     packageById,
     packagesByName,
     aliasToPackageName,
@@ -406,6 +538,20 @@ function execFileJson(command, args, cwd) {
   });
 }
 
+/** @param {string} command @param {string[]} args @param {string} cwd @returns {Promise<string>} */
+function execFileText(command, args, cwd) {
+  return new Promise((resolve, reject) => {
+    cp.execFile(command, args, { cwd, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
+      if (err) {
+        const msg = stderr ? `${err.message}\n${stderr}` : err.message;
+        reject(new Error(msg));
+        return;
+      }
+      resolve(String(stdout));
+    });
+  });
+}
+
 /** @param {string} cwd @returns {Promise<string | undefined>} */
 function findRustStdPath(cwd) {
   return new Promise(resolve => {
@@ -426,6 +572,21 @@ function normalizeCargoPath(p) {
   if (!p) return p;
   // cargo metadata normally returns native absolute paths in WSL/Linux/macOS/Windows.
   return p;
+}
+
+/** @param {string} p */
+function canonicalPath(p) {
+  const resolved = path.resolve(p);
+  return process.platform === "win32"
+    ? resolved.toLowerCase()
+    : resolved;
+}
+
+/** @param {string} targetPath @param {string} rootPath */
+function isPathInside(targetPath, rootPath) {
+  const relative = path.relative(rootPath, targetPath);
+  return relative === ""
+    || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
 }
 
 class CargoTomlDependencyDefinitionProvider {
@@ -466,7 +627,7 @@ class CargoTomlDependencyDefinitionProvider {
       const pkgs = cache.packagesByName.get(name);
       if (!pkgs || pkgs.length === 0) continue;
 
-      const external = pkgs.filter(p => p.source !== null);
+      const external = pkgs.filter(p => !cache.workspaceMemberIds.has(p.id));
       const pkg = chooseBestPackage(external.length ? external : pkgs);
       if (!pkg) continue;
 

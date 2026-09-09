@@ -2,7 +2,7 @@
   "name": "rust-cargo-external-libraries",
   "displayName": "Rust Cargo External Libraries",
   "description": "Show Cargo dependencies and rust-std as an External Libraries tree in VS Code.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "epimore",
   "license": "MIT",
   "engines": {
@@ -29,7 +29,7 @@
     "cargo-metadata"
   ],
   "activationEvents": [
-    "workspaceContains:Cargo.toml",
+    "workspaceContains:**/Cargo.toml",
     "onView:rustExternalLibraries",
     "onLanguage:toml"
   ],
