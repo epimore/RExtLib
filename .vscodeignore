@@ -1,0 +1,4 @@
+.git/**
+.github/**
+*.vsix
+CHANGELOG.md
